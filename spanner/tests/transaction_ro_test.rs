@@ -20,7 +20,10 @@ fn init() {
     let filter = tracing_subscriber::filter::EnvFilter::from_default_env()
         .add_directive("google_cloud_spanner=trace".parse().unwrap());
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
-    std::env::set_var("SPANNER_EMULATOR_HOST", "localhost:9010");
+    // Leave an explicitly configured host alone so the suite can be pointed at Spanner Omni.
+    if std::env::var("SPANNER_EMULATOR_HOST").is_err() {
+        std::env::set_var("SPANNER_EMULATOR_HOST", "localhost:9010");
+    }
 }
 
 async fn assert_read(tx: &mut ReadOnlyTransaction, user_id: &str, now: &OffsetDateTime, cts: &OffsetDateTime) {

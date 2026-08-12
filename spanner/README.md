@@ -54,6 +54,48 @@ Create `Client` and call transaction API same as [Google Cloud Go](https://githu
  }
 ```
 
+## Multiplexed sessions and Spanner Omni
+
+[Spanner Omni](https://cloud.google.com/spanner/docs) — a full Spanner server in a single
+container, unlike the Cloud Spanner emulator it serves concurrent read-write transactions —
+accepts **only multiplexed sessions**. A client that creates regular sessions is rejected at
+startup:
+
+```text
+InvalidArgument: Please use multiplexed sessions.
+Only Multiplexed sessions are supported in this environment.
+```
+
+Multiplexed sessions are off by default, because real Cloud Spanner and the Cloud Spanner
+emulator both still accept regular sessions. Turn them on either in code:
+
+```rust
+let mut config = ClientConfig::default();
+config.session_config.multiplexed = true;
+```
+
+or with an environment variable, alongside the `SPANNER_EMULATOR_HOST` this library already
+reads, so an application can be pointed at Omni without a code change:
+
+```sh
+export SPANNER_EMULATOR_HOST=localhost:9012
+export SPANNER_MULTIPLEXED_SESSIONS=true
+```
+
+With the flag set, the pool creates sessions with `CreateSession { multiplexed: true }`
+instead of `BatchCreateSessions`, read-write transactions track the highest-sequence
+precommit token seen on `BeginTransaction`, `ExecuteSql`, `ExecuteBatchDml` and streaming
+`PartialResultSet` responses and send it with `Commit`, mutation-only transactions supply a
+`mutation_key` so they have a token to send, and a commit that comes back asking to be
+retried with a fresh token is retried.
+
+A multiplexed session cannot be deleted and does not idle out, so the pool's sizing,
+eviction and health-check logic becomes largely redundant. It is left in place; the only
+visible effect is a `failed to delete session` warning when the client is closed.
+
+See [`examples/omni.rs`](examples/omni.rs) for a runnable end-to-end example, including the
+`docker run` lines that bring up a container to run it against.
+
 ## Related project
 * [google-cloud-spanner-derive](../spanner-derive)
 

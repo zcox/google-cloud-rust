@@ -120,17 +120,33 @@ pub fn user_columns() -> Vec<&'static str> {
     ]
 }
 
+/// The backend the tests run against.
+///
+/// Defaults to the Cloud Spanner emulator on its usual port. Set `SPANNER_EMULATOR_HOST` to
+/// point somewhere else, and `SPANNER_MULTIPLEXED_SESSIONS=true` to use multiplexed
+/// sessions, which is the only kind Spanner Omni accepts.
+#[allow(dead_code)]
+pub fn emulator_host() -> String {
+    std::env::var("SPANNER_EMULATOR_HOST").unwrap_or_else(|_| "localhost:9010".to_string())
+}
+
+#[allow(dead_code)]
+pub fn multiplexed_sessions() -> bool {
+    matches!(std::env::var("SPANNER_MULTIPLEXED_SESSIONS").as_deref(), Ok("true" | "1"))
+}
+
 #[allow(dead_code)]
 pub async fn create_data_client() -> Client {
     let mut session_config = SessionConfig::default();
     session_config.min_opened = 1;
     session_config.max_opened = 1;
+    session_config.multiplexed = multiplexed_sessions();
 
     Client::new(
         DATABASE,
         ClientConfig {
             session_config,
-            environment: Environment::Emulator("localhost:9010".to_string()),
+            environment: Environment::Emulator(emulator_host()),
             channel_config: ChannelConfig {
                 num_channels: 1,
                 ..Default::default()
