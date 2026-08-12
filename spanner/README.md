@@ -54,6 +54,45 @@ Create `Client` and call transaction API same as [Google Cloud Go](https://githu
  }
 ```
 
+## Running a local Spanner
+
+Two backends, both provisioned with `local-project` / `test-instance` / `local-database`
+and the schema in [`tests/ddl/schema.sql`](tests/ddl/schema.sql) — the database the
+integration tests expect. Run these from the `spanner/` directory.
+
+**Cloud Spanner emulator** — lightweight, but serves one read-write transaction at a time
+(`Aborted: The emulator only supports one transaction at a time`):
+
+```sh
+docker compose up -d
+docker compose wait spanner-init          # blocks until the schema is applied
+cargo test -p gcloud-spanner --test client_test
+```
+
+**Spanner Omni** — a full Spanner server, so concurrent read-write transactions and the
+real query planner and limits. Needs multiplexed sessions (see below) and roughly 1.5 GB:
+
+```sh
+docker compose -f docker-compose.omni.yml up -d
+docker compose -f docker-compose.omni.yml wait spanner-omni-init
+
+SPANNER_EMULATOR_HOST=localhost:9011 SPANNER_MULTIPLEXED_SESSIONS=true \
+  cargo test -p gcloud-spanner --test client_test
+```
+
+In both cases `docker compose up --wait` is *not* sufficient on its own — it returns as
+soon as the init service is running, which is before the schema exists. `compose wait`
+blocks on it exiting and propagates its exit code.
+
+The emulator defaults to publishing 9010/9020 and Omni to 9011. Override
+`SPANNER_EMULATOR_PORT`, `SPANNER_EMULATOR_REST_PORT` and `SPANNER_OMNI_PORT` to run both
+stacks side by side or to dodge a port already in use. The two stacks use separate compose
+project names, so they do not interfere with each other.
+
+Note that Omni enforces real Cloud Spanner's limits. Three integration tests bulk-insert
+20,000 twenty-column rows in one transaction, which exceeds the 120,000-mutation cap, and
+fail there while passing on the emulator. They would fail against real Cloud Spanner too.
+
 ## Multiplexed sessions and Spanner Omni
 
 [Spanner Omni](https://cloud.google.com/spanner/docs) — a full Spanner server in a single
@@ -78,7 +117,7 @@ or with an environment variable, alongside the `SPANNER_EMULATOR_HOST` this libr
 reads, so an application can be pointed at Omni without a code change:
 
 ```sh
-export SPANNER_EMULATOR_HOST=localhost:9012
+export SPANNER_EMULATOR_HOST=localhost:9011
 export SPANNER_MULTIPLEXED_SESSIONS=true
 ```
 
@@ -93,8 +132,8 @@ A multiplexed session cannot be deleted and does not idle out, so the pool's siz
 eviction and health-check logic becomes largely redundant. It is left in place; the only
 visible effect is a `failed to delete session` warning when the client is closed.
 
-See [`examples/omni.rs`](examples/omni.rs) for a runnable end-to-end example, including the
-`docker run` lines that bring up a container to run it against.
+See [`examples/omni.rs`](examples/omni.rs) for a runnable end-to-end example; bring up a
+container for it with [`docker-compose.omni.yml`](docker-compose.omni.yml) as above.
 
 ## Related project
 * [google-cloud-spanner-derive](../spanner-derive)

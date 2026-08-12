@@ -1,52 +1,87 @@
-version: "3.8"
+# Cloud Spanner emulator with a pre-provisioned test database.
+#
+# Brings up the emulator (gRPC on 9010, REST on 9020) with project local-project,
+# instance test-instance and database local-database, carrying the schema in
+# tests/ddl/schema.sql — which is the database the integration tests expect.
+#
+#   docker compose up -d
+#   docker compose wait spanner-init      # blocks until the schema is applied
+#   cargo test -p gcloud-spanner --test client_test
+#
+# `up --wait` is not enough on its own: it returns as soon as spanner-init is *running*,
+# which is well before the schema exists. `compose wait` blocks on it exiting and
+# propagates its exit code.
+#
+# Override the ports to coexist with other Spanner containers:
+#
+#   SPANNER_EMULATOR_PORT=9030 SPANNER_EMULATOR_REST_PORT=9031 docker compose up -d
+#
+# The emulator serves one read-write transaction at a time. For a backend that handles
+# concurrent read-write transactions, see docker-compose.omni.yml.
+
+name: gcloud-spanner-emulator
 
 services:
   spanner:
     image: gcr.io/cloud-spanner-emulator/emulator
     ports:
-      - "9020:9020"
-      - "9010:9010"
+      - "${SPANNER_EMULATOR_PORT:-9010}:9010"
+      - "${SPANNER_EMULATOR_REST_PORT:-9020}:9020"
+
   spanner-init:
-    image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    links:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:alpine
+    depends_on:
       - spanner
-    command: >
-      bash -c 'gcloud config configurations create emulator &&
-              gcloud config set auth/disable_credentials true &&
-              gcloud config set project local-project &&
-              gcloud config set api_endpoint_overrides/spanner http://spanner:9020/ &&
-              gcloud config set auth/disable_credentials true &&
-              gcloud spanner instances create test-instance --config=emulator-config --description=Emulator --nodes=1'
-  spanner-create:
-    image: mercari/wrench
-    command: create --directory /ddl
     volumes:
-      - ./tests/ddl:/ddl
-    environment:
-      SPANNER_PROJECT_ID: local-project
-      SPANNER_INSTANCE_ID: test-instance
-      SPANNER_DATABASE_ID: local-database
-      SPANNER_EMULATOR_HOST: spanner:9010
-    links:
-      - spanner
-    depends_on:
-      - spanner-init
-  spanner-drop:
-    image: mercari/wrench
-    command: drop
-    environment:
-      SPANNER_PROJECT_ID: local-project
-      SPANNER_INSTANCE_ID: test-instance
-      SPANNER_DATABASE_ID: local-database
-      SPANNER_EMULATOR_HOST: spanner:9010
-    links:
-      - spanner
-    depends_on:
-      - spanner-init
+      - ./tests/ddl:/ddl:ro
+    command: >
+      sh -c '
+        # Configure gcloud for emulator
+        gcloud config configurations create emulator 2>/dev/null || true
+        gcloud config set auth/disable_credentials true
+        gcloud config set project local-project
+        gcloud config set api_endpoint_overrides/spanner http://spanner:9020/
+
+        # Wait for emulator to be ready by polling instances list
+        echo "Waiting for Spanner emulator to be ready..."
+        until gcloud spanner instances list >/dev/null 2>&1; do
+          echo "  Emulator not ready, retrying in 1s..."
+          sleep 1
+        done
+        echo "Emulator is ready"
+
+        # Create instance if it does not exist (idempotent)
+        if ! gcloud spanner instances describe test-instance >/dev/null 2>&1; then
+          echo "Creating instance test-instance..."
+          gcloud spanner instances create test-instance \
+            --config=emulator-config \
+            --description="Test instance" \
+            --nodes=1
+        else
+          echo "Instance test-instance already exists"
+        fi
+
+        # Create database with schema if it does not exist (idempotent)
+        if ! gcloud spanner databases describe local-database --instance=test-instance >/dev/null 2>&1; then
+          echo "Creating database local-database with schema..."
+          gcloud spanner databases create local-database \
+            --instance=test-instance \
+            --ddl-file=/ddl/schema.sql
+        else
+          echo "Database local-database already exists"
+        fi
+
+        echo "Spanner emulator initialization complete"
+      '
+
   spanner-cli:
+    profiles:
+      - cli
     image: sjdaws/spanner-cli:latest
+    platform: linux/amd64
+    depends_on:
+      spanner-init:
+        condition: service_completed_successfully
     environment:
       SPANNER_EMULATOR_HOST: spanner:9010
     command: spanner-cli -p local-project -i test-instance -d local-database
-    depends_on:
-      - spanner-init

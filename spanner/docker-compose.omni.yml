@@ -1,0 +1,89 @@
+# Spanner Omni — a full Spanner server in a single container.
+#
+# Unlike the Cloud Spanner emulator in docker-compose.yml, Omni serves concurrent
+# read-write transactions, so it can exercise contention and OCC behaviour locally.
+# The trade-off is that it accepts *only* multiplexed sessions, which means the client
+# needs `SessionConfig::multiplexed = true` (or `SPANNER_MULTIPLEXED_SESSIONS=true`).
+#
+#   docker compose -f docker-compose.omni.yml up -d
+#   docker compose -f docker-compose.omni.yml wait spanner-omni-init
+#   SPANNER_EMULATOR_HOST=localhost:9011 SPANNER_MULTIPLEXED_SESSIONS=true \
+#     cargo run -p gcloud-spanner --example omni
+#
+# `up --wait` is not enough on its own: it returns as soon as spanner-omni-init is
+# *running*, which is a minute or so before the schema exists. `compose wait` blocks on
+# it exiting and propagates its exit code.
+#
+# Override SPANNER_OMNI_PORT to coexist with other Spanner containers, e.g. this repo's
+# own emulator stack on 9010:
+#
+#   SPANNER_OMNI_PORT=9012 docker compose -f docker-compose.omni.yml up -d
+#
+# Omni is memory hungry (~1.5 GB steady state). If the server log shows
+# "Server ... has stopped: ... signal: killed" in a loop, give Docker more memory.
+#
+# `down` keeps the database in the named volume; `down -v` resets it.
+
+name: gcloud-spanner-omni
+
+services:
+  spanner-omni:
+    image: ${SPANNER_OMNI_IMAGE:-us-docker.pkg.dev/spanner-omni/images/spanner-omni:2026.r1-beta.3}
+    command: start-single-server
+    ports:
+      # Omni serves gRPC on 15000 inside the container.
+      - "${SPANNER_OMNI_PORT:-9011}:15000"
+    volumes:
+      - omni-data:/spanner
+    healthcheck:
+      # The absolute path matters: `CMD` does not run a shell, so PATH does not apply.
+      # Omni takes ~15s to log "Spanner is ready" from cold.
+      test: ["CMD", "/google/spanner/bin/spanner", "databases", "list"]
+      interval: 5s
+      timeout: 30s
+      retries: 40
+      start_period: 15s
+
+  # Omni does not create databases on demand, so one has to be made before use. The
+  # image ships its own CLI, which saves pulling a second image.
+  spanner-omni-init:
+    image: ${SPANNER_OMNI_IMAGE:-us-docker.pkg.dev/spanner-omni/images/spanner-omni:2026.r1-beta.3}
+    depends_on:
+      spanner-omni:
+        condition: service_healthy
+    volumes:
+      - ./tests/ddl:/ddl:ro
+    environment:
+      SPANNER_DATABASE_ID: ${SPANNER_DATABASE_ID:-local-database}
+    # The image has no bash and a toybox /bin/sh with no `set -e`, so every failure is
+    # checked explicitly.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        SPANNER=/google/spanner/bin/spanner
+        ENDPOINT=dns:///spanner-omni:15000
+        DB="$${SPANNER_DATABASE_ID}"
+
+        if $$SPANNER databases list --deployment-endpoint="$$ENDPOINT" | grep -q "^$$DB "; then
+          echo "database $$DB already exists"
+          exit 0
+        fi
+
+        echo "creating database $$DB"
+        $$SPANNER databases create "$$DB" --deployment-endpoint="$$ENDPOINT" --timeout 5m
+        if [ $$? -ne 0 ]; then
+          echo "failed to create database $$DB"
+          exit 1
+        fi
+
+        echo "applying /ddl/schema.sql"
+        $$SPANNER databases ddl update "$$DB" --ddl-file=/ddl/schema.sql --deployment-endpoint="$$ENDPOINT"
+        if [ $$? -ne 0 ]; then
+          echo "failed to apply schema to $$DB"
+          exit 1
+        fi
+
+        echo "database $$DB is ready"
+
+volumes:
+  omni-data:

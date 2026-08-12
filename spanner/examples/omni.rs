@@ -20,17 +20,16 @@
 //!
 //! ## Running
 //!
+//! From the `spanner/` directory:
+//!
 //! ```sh
-//! docker run -d --name gcloud-rust-omni -p 9012:15000 \
-//!   us-docker.pkg.dev/spanner-omni/images/spanner-omni:2026.r1-beta.3 start-single-server
+//! docker compose -f docker-compose.omni.yml up -d
+//! docker compose -f docker-compose.omni.yml wait spanner-omni-init
 //!
-//! docker cp spanner/tests/ddl/schema.sql gcloud-rust-omni:/tmp/schema.sql
-//! docker exec gcloud-rust-omni /google/spanner/bin/spanner databases create local-database
-//! docker exec gcloud-rust-omni /google/spanner/bin/spanner databases ddl update \
-//!   local-database --ddl-file=/tmp/schema.sql
-//!
-//! SPANNER_EMULATOR_HOST=localhost:9012 cargo run -p gcloud-spanner --example omni
+//! SPANNER_EMULATOR_HOST=localhost:9011 cargo run -p gcloud-spanner --example omni
 //! ```
+//!
+//! Set `SPANNER_OMNI_PORT` on both commands to publish somewhere other than 9011.
 //!
 //! Omni serves a single implicit instance and ignores the project/instance
 //! segments of the database path on the data plane, so `DATABASE` below can keep
@@ -45,7 +44,8 @@ use gcloud_spanner::statement::Statement;
 use gcloud_spanner::value::CommitTimestamp;
 
 const DATABASE: &str = "projects/local-project/instances/test-instance/databases/local-database";
-const DEFAULT_HOST: &str = "localhost:9012";
+/// Matches the default `SPANNER_OMNI_PORT` in docker-compose.omni.yml.
+const DEFAULT_HOST: &str = "localhost:9011";
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
